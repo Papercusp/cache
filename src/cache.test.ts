@@ -204,3 +204,38 @@ describe('Cache — kill-switch bypass (P-018)', () => {
     await expect(c.getOrSet('', 'k', () => 'x')).rejects.toThrow(/workspaceId/);
   });
 });
+
+describe('Cache — factory rejection', () => {
+  it('propagates a factory rejection to the caller, never caches it, and retries next call', async () => {
+    const c = new Cache();
+    let calls = 0;
+    const failOnce = (): Promise<string> => {
+      calls++;
+      return calls === 1 ? Promise.reject(new Error('backend down')) : Promise.resolve('recovered');
+    };
+    await expect(c.getOrSet('w1', 'k', failOnce)).rejects.toThrow('backend down');
+    // The failed build left no entry and no wedged single-flight — a retry rebuilds.
+    expect(await c.getOrSet('w1', 'k', failOnce)).toBe('recovered');
+    expect(calls).toBe(2);
+  });
+
+  it('a rejection does not leak an unhandled rejection from the single-flight bookkeeping', async () => {
+    // Regression (P-009 discovery): the inflight cleanup used `void p.finally(...)`,
+    // whose DERIVED promise re-rejects unhandled on every factory rejection even
+    // when the caller handles the returned promise.
+    const unhandled: unknown[] = [];
+    const onUnhandled = (err: unknown): void => {
+      unhandled.push(err);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const c = new Cache();
+      await c.getOrSet('w1', 'k', () => Promise.reject(new Error('boom'))).catch(() => undefined);
+      await tick();
+      await tick();
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+});
