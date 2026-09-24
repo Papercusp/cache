@@ -49,6 +49,9 @@ export interface CacheEntry<V> {
  */
 export type CacheOutcome = 'hit' | 'stale' | 'miss' | 'bypass';
 
+/** Primary reason at lookup time. Absent includes eviction/clear/new keys; no key history is retained. */
+export type CacheReadReason = 'fresh' | 'soft-ttl' | 'hard-ttl' | 'invalidated' | 'absent' | 'bypass';
+
 export interface GetOrSetOptions {
   /** Data dependencies; invalidating any one of these marks the entry stale. */
   tags?: readonly string[];
@@ -64,7 +67,7 @@ export interface GetOrSetOptions {
    * {@link CacheStats} can't express. Pure side-channel — it never affects the
    * cached value and any throw from it is swallowed (telemetry must not break a read).
    */
-  onOutcome?: (outcome: CacheOutcome) => void;
+  onOutcome?: (outcome: CacheOutcome, reason: CacheReadReason) => void;
 }
 
 export interface CacheStats {

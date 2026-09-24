@@ -21,7 +21,7 @@ export { getOrSetBounded } from './bounded';
 export type { BoundedOutcome } from './bounded';
 export { InMemoryGenerationStore } from './generation-store';
 export { LruCache } from './l1';
-export type { CacheEntry, CacheOutcome, CacheStats, Clock, GenerationStore, GetOrSetOptions } from './types';
+export type { CacheEntry, CacheOutcome, CacheReadReason, CacheStats, Clock, GenerationStore, GetOrSetOptions } from './types';
 
 import { Cache, type CacheConfig } from './cache';
 

@@ -1,6 +1,6 @@
 import { InMemoryGenerationStore } from './generation-store';
 import { LruCache } from './l1';
-import type { CacheEntry, CacheOutcome, CacheStats, Clock, GenerationStore, GetOrSetOptions } from './types';
+import type { CacheEntry, CacheOutcome, CacheReadReason, CacheStats, Clock, GenerationStore, GetOrSetOptions } from './types';
 
 const SEP = '\0';
 
@@ -27,10 +27,10 @@ export interface CacheConfig {
 }
 
 /** Fire the per-call outcome hook, swallowing any throw (telemetry must not break a read). */
-function reportOutcome(opts: GetOrSetOptions, outcome: CacheOutcome): void {
+function reportOutcome(opts: GetOrSetOptions, outcome: CacheOutcome, reason: CacheReadReason): void {
   if (!opts.onOutcome) return;
   try {
-    opts.onOutcome(outcome);
+    opts.onOutcome(outcome, reason);
   } catch {
     /* a telemetry hook must never affect the cached value */
   }
@@ -71,12 +71,12 @@ export class Cache {
     return workspaceId + SEP + key;
   }
 
-  private freshness(workspaceId: string, entry: CacheEntry<unknown>, now: number): 'fresh' | 'soft' | 'dead' {
-    if (now >= entry.hardExpiresAt) return 'dead';
+  private freshness(workspaceId: string, entry: CacheEntry<unknown>, now: number): CacheReadReason {
+    if (now >= entry.hardExpiresAt) return 'hard-ttl';
     for (const tag of entry.tags) {
-      if (this.gens.current(workspaceId, tag) !== (entry.builtGen[tag] ?? 0)) return 'dead';
+      if (this.gens.current(workspaceId, tag) !== (entry.builtGen[tag] ?? 0)) return 'invalidated';
     }
-    if (now >= entry.softExpiresAt) return 'soft';
+    if (now >= entry.softExpiresAt) return 'soft-ttl';
     return 'fresh';
   }
 
@@ -91,29 +91,29 @@ export class Cache {
     // just run the factory. fullKey() still ran above so the workspace-scope guard
     // (D-010) is enforced even while bypassed.
     if (this.bypass()) {
-      reportOutcome(opts, 'bypass');
+      reportOutcome(opts, 'bypass', 'bypass');
       return factory();
     }
     const now = this.clock();
     const existing = this.l1.get(fk) as CacheEntry<V> | undefined;
+    const state = existing ? this.freshness(workspaceId, existing, now) : 'absent';
     if (existing) {
-      const state = this.freshness(workspaceId, existing, now);
       if (state === 'fresh') {
         this.stats.hits++;
-        reportOutcome(opts, 'hit');
+        reportOutcome(opts, 'hit', state);
         return existing.value;
       }
-      if (state === 'soft') {
+      if (state === 'soft-ttl') {
         this.stats.staleServed++;
-        reportOutcome(opts, 'stale');
+        reportOutcome(opts, 'stale', state);
         // Background revalidate; keep serving stale meanwhile.
         void this.build(workspaceId, fk, factory, opts).catch(() => undefined);
         return existing.value;
       }
-      // 'dead' ⇒ rebuild (await)
+      // Hard expiry or invalidation ⇒ rebuild (await).
     }
     this.stats.misses++;
-    reportOutcome(opts, 'miss');
+    reportOutcome(opts, 'miss', state);
     return this.build(workspaceId, fk, factory, opts);
   }
 

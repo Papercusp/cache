@@ -10,6 +10,42 @@ function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
 }
 const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
+describe('Cache outcome reasons', () => {
+  it('distinguishes absence, invalidation, soft expiry and hard expiry without changing read behavior', async () => {
+    let now = 0;
+    let bypass = false;
+    const cache = new Cache({ clock: () => now, bypass: () => bypass });
+    const seen: string[][] = [];
+    const opts = { tags: ['rows'], softTtlMs: 10, hardTtlMs: 20,
+      onOutcome: (outcome: string, reason: string) => { seen.push([outcome, reason]); } };
+    let builds = 0;
+    const read = () => cache.getOrSet('workspace', 'key', () => ++builds, opts);
+    expect(await read()).toBe(1);
+    expect(await read()).toBe(1);
+    cache.invalidateByTag('workspace', 'rows');
+    expect(await read()).toBe(2);
+    now = 11;
+    expect(await read()).toBe(2); // stale value, background rebuild
+    await tick();
+    now = 32;
+    expect(await read()).toBe(4); // hard TTL requires blocking rebuild
+    bypass = true;
+    expect(await read()).toBe(5);
+    expect(seen).toEqual([
+      ['miss', 'absent'], ['hit', 'fresh'], ['miss', 'invalidated'],
+      ['stale', 'soft-ttl'], ['miss', 'hard-ttl'], ['bypass', 'bypass'],
+    ]);
+  });
+
+  it('keeps telemetry errors from affecting cached values or factory errors', async () => {
+    const cache = new Cache();
+    const opts = { onOutcome: () => { throw new Error('telemetry'); } };
+    expect(await cache.getOrSet('workspace', 'ok', () => 'value', opts)).toBe('value');
+    expect(await cache.getOrSet('workspace', 'ok', () => 'wrong', opts)).toBe('value');
+    await expect(cache.getOrSet('workspace', 'error', () => { throw new Error('factory'); }, opts)).rejects.toThrow('factory');
+  });
+});
+
 describe('Cache — getOrSet basics', () => {
   it('runs the factory once and serves the cached value on repeat gets', async () => {
     const c = new Cache();
