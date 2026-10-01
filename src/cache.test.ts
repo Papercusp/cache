@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { Cache } from './cache';
+import { LruCache } from './l1';
+import type { CacheEntry } from './types';
 
 function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
   let resolve!: (v: T) => void;
@@ -151,6 +153,78 @@ describe('Cache — TTL + stale-while-revalidate', () => {
     expect(await c.getOrSet('w', 'k', f, { hardTtlMs: 100 })).toBe('v1');
     now = 150;
     expect(await c.getOrSet('w', 'k', f, { hardTtlMs: 100 })).toBe('v2');
+  });
+});
+
+describe('Cache — hard-expired root reclamation', () => {
+  const l1Of = (cache: Cache): LruCache<CacheEntry<unknown>> =>
+    (cache as unknown as { l1: LruCache<CacheEntry<unknown>> }).l1;
+
+  it('drops dormant hard-expired values during unrelated reads below the capacity limit', async () => {
+    let now = 0;
+    const cache = new Cache({ clock: () => now, maxL1Entries: 50_000 });
+    await cache.getOrSet('w', 'dormant', () => Array(948).fill({ body: 'expired context' }), { hardTtlMs: 100 });
+    const healthy = { body: 'useful context' };
+    await cache.getOrSet('w', 'healthy', () => healthy);
+    now = 100;
+    expect(await cache.getOrSet('w', 'healthy', () => 'wrong')).toBe(healthy);
+    expect(l1Of(cache).get('w\0dormant') === undefined).toBe(true);
+    expect(l1Of(cache).size).toBe(1);
+  });
+
+  it('bounds each read and makes progress through a large expired population while a hot key is touched', async () => {
+    let now = 0;
+    const cache = new Cache({ clock: () => now });
+    for (let i = 0; i < 1024; i++) {
+      await cache.getOrSet('w', 'dormant-' + i, () => ({ i }), { hardTtlMs: 100 });
+    }
+    const healthy = { body: 'useful context' };
+    await cache.getOrSet('other-workspace', 'healthy', () => healthy);
+    now = 100;
+    const before = l1Of(cache).size;
+    expect(await cache.getOrSet('other-workspace', 'healthy', () => 'wrong')).toBe(healthy);
+    const removed = before - l1Of(cache).size;
+    expect(removed).toBeGreaterThan(0);
+    expect(removed).toBeLessThanOrEqual(64);
+    for (let i = 0; i < 20; i++) await cache.getOrSet('other-workspace', 'healthy', () => 'wrong');
+    expect(l1Of(cache).size).toBe(1);
+    expect(l1Of(cache).get('other-workspace\0healthy')?.value).toBe(healthy);
+  });
+
+  it('preserves soft-expired values and shares a blocking rebuild when the hard-expired root is pruned', async () => {
+    let now = 0;
+    const cache = new Cache({ clock: () => now });
+    const original = { body: 'useful stale context' };
+    await cache.getOrSet('w', 'soft', () => original, { softTtlMs: 10, hardTtlMs: 100 });
+    await cache.getOrSet('w', 'hard', () => 'expired', { hardTtlMs: 10 });
+    now = 10;
+    const pending = deferred<string>();
+    let builds = 0;
+    const factory = () => { builds++; return pending.promise; };
+    const first = cache.getOrSet('w', 'hard', factory);
+    const second = cache.getOrSet('w', 'hard', factory);
+    expect(l1Of(cache).get('w\0hard')).toBeUndefined();
+    expect(l1Of(cache).get('w\0soft')?.value).toBe(original);
+    pending.resolve('replacement');
+    expect(await Promise.all([first, second])).toEqual(['replacement', 'replacement']);
+    expect(builds).toBe(1);
+    expect(cache.stats.singleFlightJoins).toBe(1);
+    const refresh = deferred<typeof original>();
+    expect(await cache.getOrSet('w', 'soft', () => refresh.promise, { hardTtlMs: 100 })).toBe(original);
+    refresh.resolve({ body: 'refreshed' });
+    await tick();
+  });
+
+  it('resets a bounded pruning pass after clear without changing LRU order', () => {
+    const lru = new LruCache<number>(4);
+    lru.set('old', 1);
+    expect(lru.prune(value => value === 1, 1)).toEqual({ checked: 1, removed: 1 });
+    lru.clear();
+    lru.set('a', 2); lru.set('b', 3); lru.set('c', 4); lru.set('d', 5);
+    expect(lru.prune(value => value === 3, 2)).toEqual({ checked: 2, removed: 1 });
+    lru.set('e', 6); lru.set('f', 7);
+    expect(lru.get('a')).toBeUndefined(); // pruning did not touch a's recency
+    expect(lru.get('c')).toBe(4);
   });
 });
 
