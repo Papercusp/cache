@@ -179,6 +179,13 @@ export class Cache {
     if (tags.length > 0) this.gens.bump(workspaceId, tags);
   }
 
+  /** Capture the existing invalidation clock for a consumer that must fence an
+   * in-flight result as well as the next cache read. No independent clock/store. */
+  generationSnapshot(workspaceId: string, tags: readonly string[]): Record<string, number> {
+    if (!workspaceId) throw new Error('Cache: workspaceId is required');
+    return this.gens.snapshot(workspaceId, tags);
+  }
+
   /** Drop the L1 entry for a key (does not touch generations). */
   forget(workspaceId: string, key: string): void {
     this.l1.delete(this.fullKey(workspaceId, key));
